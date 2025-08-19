@@ -1,0 +1,27 @@
+Restaurant Menu
+===============
+
+Starters
+--------
+1. Tomato Soup ............. $4.50
+2. Caesar Salad ............ $5.00
+3. Garlic Bread ............ $3.50
+
+Main Courses
+------------
+1. Grilled Chicken Breast .. $12.00
+2. Spaghetti Bolognese ..... $11.50
+3. Vegetable Stir Fry ...... $10.00
+4. Beef Burger ............. $13.00
+
+Desserts
+--------
+1. Chocolate Cake .......... $5.50
+2. Ice Cream Sundae ........ $4.75
+3. Fruit Salad ............. $4.00
+
+Drinks
+------
+1. Coffee .................. $2.50
+2. Fresh Orange Juice ...... $3.00
+3. Mineral Water ........... $2.00
