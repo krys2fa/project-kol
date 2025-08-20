@@ -102,13 +102,38 @@ async def entrypoint(ctx: JobContext):
         ),
     )
 
-    def _build_bm25_chat_engine(top_k: int):
-        # Lazy import to keep base image minimal
-        from llama_index.core.retrievers import BM25Retriever
+    def _build_keyword_chat_engine(top_k: int):
+        # Lightweight keyword-count retriever (no embeddings or extra packages)
+        from typing import List
+        from llama_index.core.retrievers import BaseRetriever
+        from llama_index.core.schema import NodeWithScore, TextNode
         from llama_index.core.chat_engine import ContextChatEngine
 
         documents = SimpleDirectoryReader("docs").load_data()
-        retriever = BM25Retriever.from_defaults(documents=documents, similarity_top_k=top_k)
+
+        class KeywordCountRetriever(BaseRetriever):
+            def __init__(self, nodes: List[TextNode], k: int):
+                self.nodes = nodes
+                self.k = k
+
+            def _score(self, text: str, query: str) -> float:
+                q = query.lower().split()
+                t = text.lower()
+                return float(sum(t.count(tok) for tok in q if tok))
+
+            def retrieve(self, query: str) -> List[NodeWithScore]:
+                scored = [
+                    NodeWithScore(node=n, score=self._score(n.text or "", query))
+                    for n in self.nodes
+                ]
+                scored.sort(key=lambda x: x.score, reverse=True)
+                return scored[: self.k]
+
+            async def aretrieve(self, query: str) -> List[NodeWithScore]:
+                return self.retrieve(query)
+
+        nodes = [TextNode(text=d.text) for d in documents]
+        retriever = KeywordCountRetriever(nodes, top_k)
         return ContextChatEngine.from_defaults(retriever=retriever)
 
     top_k = int(os.getenv("RAG_TOP_K", "1"))
@@ -120,8 +145,8 @@ async def entrypoint(ctx: JobContext):
         # Fall back to BM25 when embeddings backends are missing
         msg = str(e)
         if isinstance(e, (ImportError, ModuleNotFoundError)) or "llama_index.embeddings" in msg or "llama-index-embeddings-openai" in msg:
-            logging.warning("Embeddings unavailable; falling back to BM25 retriever.")
-            chat_engine = _build_bm25_chat_engine(top_k)
+            logging.warning("Embeddings unavailable; falling back to keyword retriever.")
+            chat_engine = _build_keyword_chat_engine(top_k)
         else:
             raise
 
