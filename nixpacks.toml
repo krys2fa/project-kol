@@ -1,0 +1,11 @@
+providers = ["python"]
+
+[phases.install]
+cmds = [
+  "pip install --no-cache-dir -r requirements.txt"
+]
+
+[phases.start]
+cmds = [
+  "python start_railway.py"
+]
