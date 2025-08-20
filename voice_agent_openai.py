@@ -13,7 +13,14 @@ from livekit.plugins.deepgram import STT as DeepgramSTT
 load_dotenv()
 
 logger = logging.getLogger("voice-assistant")
-from llama_index.llms.openai import OpenAI as OpenAILLM
+try:
+    # Prefer OpenAI-compatible client that accepts custom model names (e.g., Groq)
+    from llama_index.llms.groq import Groq as GroqLLM  # type: ignore
+    _OPENAI_LIKE = False
+except Exception:
+    # Fallback to standard OpenAI client (may not support non-OpenAI model names)
+    from llama_index.llms.openai import OpenAI as OpenAILLM  # type: ignore
+    _OPENAI_LIKE = False
 from llama_index.core import (
     SimpleDirectoryReader,
     StorageContext,
@@ -34,13 +41,16 @@ Settings.embed_model = embed_model
 # Set OPENAI_BASE_URL=https://api.groq.com/openai/v1
 # Optionally override model via OPENAI_MODEL or GROQ_MODEL
 api_base = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE")
-api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")
+api_key = os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY")
 model_name = (
     os.getenv("OPENAI_MODEL")
     or os.getenv("GROQ_MODEL")
     or "llama-3.1-8b-instant"
 )
-Settings.llm = OpenAILLM(model=model_name, api_base=api_base, api_key=api_key)
+# Allow overriding context window explicitly for non-OpenAI models
+context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "8192"))
+Settings.llm = GroqLLM(model=model_name, api_key=api_key)
+# context_window override no longer needed with Groq adapter
 
 # check if storage already exists
 PERSIST_DIR = "./chat-engine-storage"
@@ -65,8 +75,14 @@ async def entrypoint(ctx: JobContext):
     chat_context = ChatContext().append(
         role="system",
         text=(
-            "You are a funny, witty assistant."
-            "Respond with short and concise answers. Avoid using unpronouncable punctuation or emojis."
+            "You are a friendly, accommodating restaurant call center agent for our restaurant. "
+            "Your job is to help callers place takeout orders or book table reservations. "
+            "Use only information found in the provided documents (e.g., menu and policies) and do not invent or guess. "
+            "If the information is not available in the documents, clearly say it is not available. "
+            "Keep answers short and concise, and avoid unpronounceable punctuation or emojis. "
+            "For reservations, briefly collect name, party size, date, time, and phone number. "
+            "For orders, briefly confirm item names, options, quantities, and pickup vs. delivery. "
+            "Ask only minimal clarifying questions when needed, then provide the next step."
         ),
     )
     
