@@ -3,9 +3,7 @@ import os
 from dotenv import load_dotenv
 from livekit.agents import JobContext, JobProcess, WorkerOptions, cli
 from livekit.agents.job import AutoSubscribe
-from livekit.agents.llm import (
-    ChatContext,
-)
+from livekit.agents.llm import ChatContext
 from livekit.agents.pipeline import VoicePipelineAgent
 from livekit.plugins import cartesia, silero, llama_index
 from livekit.plugins.deepgram import STT as DeepgramSTT
@@ -13,80 +11,109 @@ from livekit.plugins.deepgram import STT as DeepgramSTT
 load_dotenv()
 
 logger = logging.getLogger("voice-assistant")
+
+# Prefer Groq-native LLM; fall back to OpenAI client if unavailable
 try:
-    # Prefer OpenAI-compatible client that accepts custom model names (e.g., Groq)
     from llama_index.llms.groq import Groq as GroqLLM  # type: ignore
-    _OPENAI_LIKE = False
+    _USE_OPENAI_CLIENT = False
 except Exception:
-    # Fallback to standard OpenAI client (may not support non-OpenAI model names)
     from llama_index.llms.openai import OpenAI as OpenAILLM  # type: ignore
-    _OPENAI_LIKE = False
+    _USE_OPENAI_CLIENT = True
+
 from llama_index.core import (
     SimpleDirectoryReader,
     StorageContext,
     VectorStoreIndex,
-    import logging
-    import os
-    import sys
-    from dotenv import load_dotenv
-    from livekit.agents import JobContext, JobProcess, WorkerOptions, cli
-    from livekit.agents.job import AutoSubscribe
-    from livekit.agents.llm import ChatContext
-    from livekit.agents.pipeline import VoicePipelineAgent
-    from livekit.plugins import cartesia, silero, llama_index
-    from livekit.plugins.deepgram import STT as DeepgramSTT
+    load_index_from_storage,
+    Settings,
+)
+from llama_index.core.chat_engine.types import ChatMode
 
-    load_dotenv()
 
-    logger = logging.getLogger("voice-assistant")
+def _get_float_env(name: str, default: float) -> float:
     try:
-        from llama_index.llms.groq import Groq as GroqLLM  # type: ignore
-        _OPENAI_LIKE = False
+        return float(os.getenv(name, str(default)))
     except Exception:
-        from llama_index.llms.openai import OpenAI as OpenAILLM  # type: ignore
-        _OPENAI_LIKE = False
-    from llama_index.core import SimpleDirectoryReader, StorageContext, VectorStoreIndex, load_index_from_storage, Settings
-    from llama_index.core.chat_engine.types import ChatMode
-    load_dotenv()
+        return default
 
-    # Configure OpenAI-compatible LLM (Groq) via env
-    api_base = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE")
+
+def _ensure_index():
+    """Load a prebuilt index; optionally build locally if allowed.
+
+    - Requires prebuilt storage at ./chat-engine-storage when REQUIRE_INDEX=1
+    - Only imports HuggingFaceEmbedding when building locally.
+    """
+    persist_dir = "./chat-engine-storage"
+    require_index = os.getenv("REQUIRE_INDEX", "").lower() in ("1", "true", "yes")
+
+    if not os.path.exists(persist_dir):
+        if require_index:
+            raise RuntimeError(
+                "chat-engine-storage not found. Prebuild the index locally (run the agent once) "
+                "and commit the 'chat-engine-storage' folder, or unset REQUIRE_INDEX to allow building."
+            )
+        # Heavy import only when building locally
+        from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+
+        Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        documents = SimpleDirectoryReader("docs").load_data()
+        index = VectorStoreIndex.from_documents(documents)
+        index.storage_context.persist(persist_dir=persist_dir)
+        return index
+
+    storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
+    return load_index_from_storage(storage_context)
+
+
+def prewarm(proc: JobProcess):
+    # Faster end-of-speech detection
+    min_silence_s = _get_float_env("VAD_MIN_SILENCE_S", 0.35)
+    activation = _get_float_env("VAD_ACTIVATION", 0.5)
+    prefix_pad_s = _get_float_env("VAD_PREFIX_PAD_S", 0.2)
+    proc.userdata["vad"] = silero.VAD.load(
+        min_silence_duration=min_silence_s,
+        activation_threshold=activation,
+        prefix_padding_duration=prefix_pad_s,
+    )
+
+
+async def entrypoint(ctx: JobContext):
+    # Configure LLM (Groq via LlamaIndex Settings)
     api_key = os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY")
     model_name = (
         os.getenv("OPENAI_MODEL")
         or os.getenv("GROQ_MODEL")
         or "llama-3.1-8b-instant"
     )
-    Settings.llm = GroqLLM(model=model_name, api_key=api_key)
 
-    # check if storage already exists
-    PERSIST_DIR = "./chat-engine-storage"
-    REQUIRE_INDEX = os.getenv("REQUIRE_INDEX", "").lower() in ("1", "true", "yes")
-    if not os.path.exists(PERSIST_DIR):
-        if REQUIRE_INDEX:
-            raise RuntimeError(
-                "chat-engine-storage not found. Prebuild the index locally (run the agent once) "
-                "and commit the 'chat-engine-storage' folder, or unset REQUIRE_INDEX to allow building."
-            )
-        # Only import heavy embeddings when we need to build the index locally
-        from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-        Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        documents = SimpleDirectoryReader("docs").load_data()
-        index = VectorStoreIndex.from_documents(documents)
-        index.storage_context.persist(persist_dir=PERSIST_DIR)
+    if _USE_OPENAI_CLIENT:
+        # This path will only work with real OpenAI models; kept for safety.
+        Settings.llm = OpenAILLM(model=model_name, api_key=api_key)
     else:
-        storage_context = StorageContext.from_defaults(persist_dir=PERSIST_DIR)
-        index = load_index_from_storage(storage_context)
+        Settings.llm = GroqLLM(model=model_name, api_key=api_key)
 
+    index = _ensure_index()
 
+    # Restaurant call center behavior; doc-grounded and concise
+    chat_context = ChatContext().append(
+        role="system",
+        text=(
+            "You are a helpful restaurant call center agent for Kol Restaurant. "
+            "Answer only using information from the provided documents. If the answer isn't in the docs, say you don't know and offer to connect a human. "
+            "Be brief and conversational; no emojis or special punctuation."
+        ),
+    )
 
-    logger.info(f"Connecting to room {ctx.room.name}")
+    top_k = int(os.getenv("RAG_TOP_K", "1"))
+    chat_engine = index.as_chat_engine(chat_mode=ChatMode.CONTEXT, similarity_top_k=top_k)
+
+    logging.info(f"Connecting to room {ctx.room.name}")
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
     participant = await ctx.wait_for_participant()
-    logger.info(f"Starting voice assistant for participant {participant.identity}")
+    logging.info(f"Starting voice assistant for participant {participant.identity}")
 
-    # Prefer Deepgram STT for reliability/cost; requires DEEPGRAM_API_KEY
+    # Deepgram STT
     endpoint_ms = int(os.getenv("DG_ENDPOINT_MS", "15"))
     dg_model = os.getenv("DEEPGRAM_MODEL", "nova-3-general")
     stt_impl = DeepgramSTT(
@@ -112,55 +139,16 @@ from llama_index.core import (
     agent.start(ctx.room, participant)
 
     await agent.say(
-        "Hey there! How can I help you today?",
-        import logging
-        import os
-        import sys
-        from dotenv import load_dotenv
-        from livekit.agents import JobContext, JobProcess, WorkerOptions, cli
-        from livekit.agents.job import AutoSubscribe
-        from livekit.agents.llm import ChatContext
-        from livekit.agents.pipeline import VoicePipelineAgent
-        from livekit.plugins import cartesia, silero, llama_index
-        from livekit.plugins.deepgram import STT as DeepgramSTT
-        from llama_index.core import SimpleDirectoryReader, StorageContext, VectorStoreIndex, load_index_from_storage, Settings
-        from llama_index.core.chat_engine.types import ChatMode
+        "Hi, this is Kol Restaurant. How can I help you today?",
+        allow_interruptions=True,
+    )
 
-        load_dotenv()
 
-        logger = logging.getLogger("voice-assistant")
-        try:
-            from llama_index.llms.groq import Groq as GroqLLM  # type: ignore
-            _OPENAI_LIKE = False
-        except Exception:
-            from llama_index.llms.openai import OpenAI as OpenAILLM  # type: ignore
-            _OPENAI_LIKE = False
-
-        # Configure OpenAI-compatible LLM (Groq) via env
-        api_base = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE")
-        api_key = os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY")
-        model_name = (
-            os.getenv("OPENAI_MODEL")
-            or os.getenv("GROQ_MODEL")
-            or "llama-3.1-8b-instant"
-        )
-        Settings.llm = GroqLLM(model=model_name, api_key=api_key)
-
-        # check if storage already exists
-        PERSIST_DIR = "./chat-engine-storage"
-        REQUIRE_INDEX = os.getenv("REQUIRE_INDEX", "").lower() in ("1", "true", "yes")
-        if not os.path.exists(PERSIST_DIR):
-            if REQUIRE_INDEX:
-                raise RuntimeError(
-                    "chat-engine-storage not found. Prebuild the index locally (run the agent once) "
-                    "and commit the 'chat-engine-storage' folder, or unset REQUIRE_INDEX to allow building."
-                )
-            # Only import heavy embeddings when we need to build the index locally
-            from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-            Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
-            documents = SimpleDirectoryReader("docs").load_data()
-            index = VectorStoreIndex.from_documents(documents)
-            index.storage_context.persist(persist_dir=PERSIST_DIR)
-        else:
-            storage_context = StorageContext.from_defaults(persist_dir=PERSIST_DIR)
-            index = load_index_from_storage(storage_context)
+if __name__ == "__main__":
+    print("Starting voice agent...")
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+        ),
+    )
