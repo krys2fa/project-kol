@@ -8,11 +8,17 @@ from livekit.agents.llm import (
 )
 from livekit.agents.pipeline import VoicePipelineAgent
 from livekit.plugins import cartesia, silero, llama_index, assemblyai
+from livekit.plugins.deepgram import STT as DeepgramSTT
 
 load_dotenv()
 
 logger = logging.getLogger("voice-assistant")
 from llama_index.llms.ollama import Ollama
+import os as _os
+try:
+    import ollama as _py_ollama  # python client for warming the model
+except Exception:
+    _py_ollama = None
 from llama_index.core import (
     SimpleDirectoryReader,
     StorageContext,
@@ -26,7 +32,19 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 load_dotenv()
 
 embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
-llm=Ollama(model="gemma3", request_timeout=120.0)
+# Use a lightweight local model to avoid RAM issues and OpenAI quota
+OLLAMA_MODEL = _os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+llm = Ollama(
+    model=OLLAMA_MODEL,
+    request_timeout=120.0,
+    # modest generation limits to reduce latency
+    additional_kwargs={
+        "num_predict": 128,
+        "num_ctx": 1024,
+        "temperature": 0.6,
+    "keep_alive": "10m",
+    },
+)
 Settings.llm = llm
 Settings.embed_model = embed_model
 
@@ -44,8 +62,34 @@ else:
     index = load_index_from_storage(storage_context)
 
 
+def _get_float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
 def prewarm(proc: JobProcess):
-    proc.userdata["vad"] = silero.VAD.load()
+    # Faster end-of-speech detection
+    min_silence_s = _get_float_env("VAD_MIN_SILENCE_S", 0.35)
+    activation = _get_float_env("VAD_ACTIVATION", 0.5)
+    prefix_pad_s = _get_float_env("VAD_PREFIX_PAD_S", 0.2)
+    proc.userdata["vad"] = silero.VAD.load(
+        min_silence_duration=min_silence_s,
+        activation_threshold=activation,
+        prefix_padding_duration=prefix_pad_s,
+    )
+    # Warm up Ollama model so first response is faster
+    if _py_ollama is not None:
+        try:
+            _py_ollama.generate(
+                model=OLLAMA_MODEL,
+                prompt="Hi",
+                options={"num_predict": 5},
+                keep_alive="10m",
+            )
+        except Exception:
+            pass
 
 
 async def entrypoint(ctx: JobContext):
@@ -57,7 +101,9 @@ async def entrypoint(ctx: JobContext):
         ),
     )
     
-    chat_engine = index.as_chat_engine(chat_mode=ChatMode.CONTEXT)
+    # Reduce retrieval to speed up RAG
+    top_k = int(os.getenv("RAG_TOP_K", "1"))
+    chat_engine = index.as_chat_engine(chat_mode=ChatMode.CONTEXT, similarity_top_k=top_k)
     logger.info(f"Connecting to room {ctx.room.name}")
    
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
@@ -65,7 +111,18 @@ async def entrypoint(ctx: JobContext):
     participant = await ctx.wait_for_participant()
     logger.info(f"Starting voice assistant for participant {participant.identity}")
     
-    stt_impl = assemblyai.STT()
+    # Use Deepgram STT by default to avoid AssemblyAI model deprecation errors
+    # Requires DEEPGRAM_API_KEY in your environment/.env
+    endpoint_ms = int(os.getenv("DG_ENDPOINT_MS", "15"))
+    dg_model = os.getenv("DEEPGRAM_MODEL", "nova-3-general")
+    stt_impl = DeepgramSTT(
+        model=dg_model,
+        endpointing_ms=endpoint_ms,
+        interim_results=True,
+        no_delay=True,
+        filler_words=False,
+        energy_filter=True,
+    )
     agent = VoicePipelineAgent(
         vad=ctx.proc.userdata["vad"],
         stt=stt_impl,

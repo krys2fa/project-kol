@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voice RAG Agent Test Client</title>
+    <script src="https://unpkg.com/livekit-client@2.5.7/dist/livekit-client.umd.js"></script>
+    <script src="https://unpkg.com/livekit-server-sdk@2.6.1/dist/livekit-server-sdk.umd.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+        background-color: #f5f5f5;
+      }
+      .container {
+        background: white;
+        padding: 30px;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      }
+      h1 {
+        color: #333;
+        text-align: center;
+        margin-bottom: 30px;
+      }
+      .connection-panel {
+        background: #f8f9fa;
+        padding: 20px;
+        border-radius: 5px;
+        margin-bottom: 20px;
+      }
+      .input-group {
+        margin-bottom: 15px;
+      }
+      label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+        color: #555;
+      }
+      input {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+      button {
+        background: #007bff;
+        color: white;
+        border: none;
+        padding: 12px 24px;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 16px;
+        margin-right: 10px;
+        margin-bottom: 10px;
+      }
+      button:hover {
+        background: #0056b3;
+      }
+      button:disabled {
+        background: #6c757d;
+        cursor: not-allowed;
+      }
+      .status {
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 15px;
+        font-weight: bold;
+      }
+      .status.connected {
+        background: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+      }
+      .status.disconnected {
+        background: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+      }
+      .status.connecting {
+        background: #fff3cd;
+        color: #856404;
+        border: 1px solid #ffeaa7;
+      }
+      .audio-controls {
+        text-align: center;
+        margin-top: 20px;
+      }
+      .instructions {
+        background: #e7f3ff;
+        border: 1px solid #b3d9ff;
+        padding: 15px;
+        border-radius: 5px;
+        margin-bottom: 20px;
+      }
+      .logs {
+        background: #f8f9fa;
+        border: 1px solid #e9ecef;
+        padding: 15px;
+        border-radius: 5px;
+        height: 200px;
+        overflow-y: auto;
+        font-family: monospace;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🎤 Voice RAG Agent Test Client</h1>
+
+      <div class="instructions">
+        <strong>Instructions:</strong>
+        <ol>
+          <li>
+            Make sure your voice agent is running with:
+            <code>python voice_agent.py dev</code>
+          </li>
+          <li>Click "Connect to Room" below</li>
+          <li>Allow microphone permissions when prompted</li>
+          <li>Start speaking! Try asking about the restaurant menu</li>
+        </ol>
+      </div>
+
+      <div class="connection-panel">
+        <div class="input-group">
+          <label for="serverUrl">Server URL:</label>
+          <input
+            type="text"
+            id="serverUrl"
+            value="wss://project-kol-3u9osc9x.livekit.cloud"
+            readonly
+          />
+        </div>
+
+        <div class="input-group">
+          <label for="roomName">Room Name:</label>
+          <input
+            type="text"
+            id="roomName"
+            value="test-room"
+            placeholder="Enter room name"
+          />
+        </div>
+
+        <div class="input-group">
+          <label for="participantName">Your Name:</label>
+          <input
+            type="text"
+            id="participantName"
+            value="User"
+            placeholder="Enter your name"
+          />
+        </div>
+      </div>
+
+      <div id="status" class="status disconnected">Status: Disconnected</div>
+
+      <div class="audio-controls">
+        <button id="connectBtn" onclick="connect()">Connect to Room</button>
+        <button id="disconnectBtn" onclick="disconnect()" disabled>
+          Disconnect
+        </button>
+        <button id="muteBtn" onclick="toggleMute()" disabled>
+          Mute Microphone
+        </button>
+      </div>
+
+      <div style="margin-top: 20px">
+        <label for="logs">Connection Logs:</label>
+        <div id="logs" class="logs"></div>
+      </div>
+    </div>
+
+    <script>
+      let room = null;
+      let localAudioTrack = null;
+      let isMuted = false;
+
+      // Wait for LiveKit to load
+      function waitForLiveKit() {
+        return new Promise((resolve, reject) => {
+          if (typeof LiveKit !== "undefined") {
+            resolve();
+            return;
+          }
+
+          let attempts = 0;
+          const maxAttempts = 50;
+          const checkInterval = setInterval(() => {
+            attempts++;
+            if (typeof LiveKit !== "undefined") {
+              clearInterval(checkInterval);
+              resolve();
+            } else if (attempts >= maxAttempts) {
+              clearInterval(checkInterval);
+              reject(new Error("LiveKit library failed to load"));
+            }
+          }, 100);
+        });
+      }
+
+      function log(message) {
+        const logs = document.getElementById("logs");
+        const timestamp = new Date().toLocaleTimeString();
+        logs.innerHTML += `[${timestamp}] ${message}\n`;
+        logs.scrollTop = logs.scrollHeight;
+      }
+
+      function updateStatus(status, className) {
+        const statusEl = document.getElementById("status");
+        statusEl.textContent = `Status: ${status}`;
+        statusEl.className = `status ${className}`;
+      }
+
+      function updateButtons(connected) {
+        document.getElementById("connectBtn").disabled = connected;
+        document.getElementById("disconnectBtn").disabled = !connected;
+        document.getElementById("muteBtn").disabled = !connected;
+      }
+
+      async function generateToken() {
+        // For development/testing, we'll use a simple token generation
+        // In production, this should be done securely on your server
+        const apiKey = "APIFCV6YcSpkewn";
+        const apiSecret = "0ea5Zhf0Ip3ad61RAXRtImkeZ8D4K1AoDMcc1b5dSQmA";
+        const roomName = document.getElementById("roomName").value;
+        const participantName =
+          document.getElementById("participantName").value;
+
+        try {
+          // Create a simple token (this is a basic implementation)
+          // Note: In production, token generation should happen on your server
+          const token = await LiveKit.AccessToken.generateToken(
+            apiKey,
+            apiSecret,
+            {
+              identity: participantName,
+              name: participantName,
+              room: roomName,
+              ttl: "1h",
+            }
+          );
+          return token;
+        } catch (error) {
+          log(`Token generation error: ${error.message}`);
+          // Fallback: create a basic JWT token manually
+          const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+          const payload = btoa(
+            JSON.stringify({
+              iss: apiKey,
+              sub: participantName,
+              aud: "livekit",
+              exp: Math.floor(Date.now() / 1000) + 3600,
+              nbf: Math.floor(Date.now() / 1000),
+              video: { room: roomName, roomJoin: true },
+              identity: participantName,
+            })
+          );
+
+          return `${header}.${payload}.signature`; // Note: This won't work without proper HMAC signature
+        }
+      }
+
+      async function connect() {
+        try {
+          updateStatus("Connecting...", "connecting");
+          log("Starting connection...");
+
+          // First, wait for LiveKit to load
+          log("Waiting for LiveKit library to load...");
+          await waitForLiveKit();
+          log("LiveKit library loaded successfully!");
+
+          const serverUrl = document.getElementById("serverUrl").value;
+          const roomName = document.getElementById("roomName").value;
+          const participantName =
+            document.getElementById("participantName").value;
+
+          if (!roomName || !participantName) {
+            alert("Please enter both room name and participant name");
+            updateStatus("Disconnected", "disconnected");
+            return;
+          }
+
+          // For this test client, we'll show instructions to use the official LiveKit example
+          log("This is a simplified test client for demonstration purposes.");
+          log(
+            "For full functionality, please use the official LiveKit example:"
+          );
+          log("1. Go to: https://example.livekit.io/");
+          log("2. Enter Server URL: " + serverUrl);
+          log("3. Enter API Key: APIFCV6YcSpkewn");
+          log(
+            "4. Enter API Secret: 0ea5Zhf0Ip3ad61RAXRtImkeZ8D4K1AoDMcc1b5dSQmA"
+          );
+          log("5. Room: " + roomName);
+          log("6. Click Connect and start speaking!");
+
+          updateStatus("Use example.livekit.io for full testing", "connecting");
+
+          // Open the LiveKit example page
+          window.open("https://example.livekit.io/", "_blank");
+        } catch (error) {
+          log(`Connection error: ${error.message}`);
+          updateStatus("Connection Failed", "disconnected");
+          updateButtons(false);
+        }
+      }
+
+      async function disconnect() {
+        if (room) {
+          await room.disconnect();
+          room = null;
+        }
+        if (localAudioTrack) {
+          localAudioTrack.stop();
+          localAudioTrack = null;
+        }
+        log("Disconnected");
+        updateStatus("Disconnected", "disconnected");
+        updateButtons(false);
+      }
+
+      async function toggleMute() {
+        if (localAudioTrack) {
+          isMuted = !isMuted;
+          await localAudioTrack.setMuted(isMuted);
+          document.getElementById("muteBtn").textContent = isMuted
+            ? "Unmute Microphone"
+            : "Mute Microphone";
+          log(isMuted ? "Microphone muted" : "Microphone unmuted");
+        }
+      }
+
+      // Initialize
+      log("Voice RAG Agent Test Client loaded");
+      log(
+        "Make sure your voice agent is running with: python voice_agent.py dev"
+      );
+      log("For full functionality, use: https://example.livekit.io/");
+    </script>
+  </body>
+</html>

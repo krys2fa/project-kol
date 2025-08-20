@@ -8,11 +8,12 @@ from livekit.agents.llm import (
 )
 from livekit.agents.pipeline import VoicePipelineAgent
 from livekit.plugins import cartesia, openai, silero, llama_index
+from livekit.plugins.deepgram import STT as DeepgramSTT
 
 load_dotenv()
 
 logger = logging.getLogger("voice-assistant")
-from llama_index.llms.ollama import Ollama
+from llama_index.llms.openai import OpenAI as OpenAILLM
 from llama_index.core import (
     SimpleDirectoryReader,
     StorageContext,
@@ -24,6 +25,22 @@ from llama_index.core.chat_engine.types import ChatMode
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 load_dotenv()
+
+embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+Settings.embed_model = embed_model
+
+# Configure OpenAI-compatible LLM (Groq) via env
+# Set OPENAI_API_KEY to your Groq API key
+# Set OPENAI_BASE_URL=https://api.groq.com/openai/v1
+# Optionally override model via OPENAI_MODEL or GROQ_MODEL
+api_base = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE")
+api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")
+model_name = (
+    os.getenv("OPENAI_MODEL")
+    or os.getenv("GROQ_MODEL")
+    or "llama-3.1-8b-instant"
+)
+Settings.llm = OpenAILLM(model=model_name, api_base=api_base, api_key=api_key)
 
 # check if storage already exists
 PERSIST_DIR = "./chat-engine-storage"
@@ -53,7 +70,9 @@ async def entrypoint(ctx: JobContext):
         ),
     )
     
-    chat_engine = index.as_chat_engine(chat_mode=ChatMode.CONTEXT)
+    # Reduce retrieval to speed up RAG
+    top_k = int(os.getenv("RAG_TOP_K", "1"))
+    chat_engine = index.as_chat_engine(chat_mode=ChatMode.CONTEXT, similarity_top_k=top_k)
 
 
 
@@ -63,10 +82,21 @@ async def entrypoint(ctx: JobContext):
     participant = await ctx.wait_for_participant()
     logger.info(f"Starting voice assistant for participant {participant.identity}")
 
+    # Prefer Deepgram STT for reliability/cost; requires DEEPGRAM_API_KEY
+    endpoint_ms = int(os.getenv("DG_ENDPOINT_MS", "15"))
+    dg_model = os.getenv("DEEPGRAM_MODEL", "nova-3-general")
+    stt_impl = DeepgramSTT(
+        model=dg_model,
+        endpointing_ms=endpoint_ms,
+        interim_results=True,
+        no_delay=True,
+        filler_words=False,
+        energy_filter=True,
+    )
+
     agent = VoicePipelineAgent(
         vad=ctx.proc.userdata["vad"],
-        stt=openai.STT(),
-    
+        stt=stt_impl,
         llm=llama_index.LLM(chat_engine=chat_engine),
         tts=cartesia.TTS(
             model="sonic-2",
