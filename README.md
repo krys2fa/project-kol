@@ -178,11 +178,33 @@ Security:
 If you need an always‑on agent without Docker/Fly, use a PaaS like Railway as a background worker:
 
 - Build command: `pip install -r requirements.txt`
-- Start command: `python voice_agent_openai.py connect --room demo-room`
+- Start command: `python start_railway.py`
 - Variables: same as `.env` above
 - Choose a background/worker process (no HTTP port needed)
 
 Alternatively, you can containerize with the provided `Dockerfile` (optional) or use Fly.io (see `DEPLOY.md`).
+
+### Railway setup (step-by-step)
+
+1. Create New → Empty Project in Railway, then “Deploy from GitHub” and select this repo.
+2. In the new Service:
+
+- Build Command: `pip install -r requirements.txt`
+- Start Command: `python start_railway.py`
+
+3. Set Environment Variables (same as your `.env`, but add `ROOM`):
+
+- LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
+- GROQ_API_KEY
+- OPENAI_BASE_URL=https://api.groq.com/openai/v1
+- OPENAI_MODEL=llama-3.1-8b-instant
+- DEEPGRAM_API_KEY, DEEPGRAM_MODEL=nova-3-general
+- CARTESIA_API_KEY
+- RAG_TOP_K=1, DG_ENDPOINT_MS=15 (optional)
+- ROOM=demo-room (or any room you want the worker to join)
+
+4. Deploy. Watch logs for “Connecting to room <ROOM>”.
+5. Test from the browser using your Vercel token endpoint and example.livekit.io (see Live demo above).
 
 ## Performance and latency tips
 
