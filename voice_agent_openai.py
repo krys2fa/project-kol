@@ -92,8 +92,6 @@ async def entrypoint(ctx: JobContext):
     else:
         Settings.llm = GroqLLM(model=model_name, api_key=api_key)
 
-    index = _ensure_index()
-
     # Restaurant call center behavior; doc-grounded and concise
     chat_context = ChatContext().append(
         role="system",
@@ -104,8 +102,28 @@ async def entrypoint(ctx: JobContext):
         ),
     )
 
+    def _build_bm25_chat_engine(top_k: int):
+        # Lazy import to keep base image minimal
+        from llama_index.core.retrievers import BM25Retriever
+        from llama_index.core.chat_engine import ContextChatEngine
+
+        documents = SimpleDirectoryReader("docs").load_data()
+        retriever = BM25Retriever.from_defaults(documents=documents, similarity_top_k=top_k)
+        return ContextChatEngine.from_defaults(retriever=retriever)
+
     top_k = int(os.getenv("RAG_TOP_K", "1"))
-    chat_engine = index.as_chat_engine(chat_mode=ChatMode.CONTEXT, similarity_top_k=top_k)
+    chat_engine = None
+    try:
+        index = _ensure_index()
+        chat_engine = index.as_chat_engine(chat_mode=ChatMode.CONTEXT, similarity_top_k=top_k)
+    except Exception as e:
+        # Fall back to BM25 when embeddings backends are missing
+        msg = str(e)
+        if isinstance(e, (ImportError, ModuleNotFoundError)) or "llama_index.embeddings" in msg or "llama-index-embeddings-openai" in msg:
+            logging.warning("Embeddings unavailable; falling back to BM25 retriever.")
+            chat_engine = _build_bm25_chat_engine(top_k)
+        else:
+            raise
 
     logging.info(f"Connecting to room {ctx.room.name}")
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
