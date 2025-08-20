@@ -1,1 +1,1 @@
-worker: python start_railway.py
+worker: pip install --no-cache-dir -r requirements.txt
