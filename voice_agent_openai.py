@@ -113,6 +113,7 @@ async def entrypoint(ctx: JobContext):
 
         class KeywordCountRetriever(BaseRetriever):
             def __init__(self, nodes: List[TextNode], k: int):
+                super().__init__()
                 self.nodes = nodes
                 self.k = k
 
@@ -121,16 +122,13 @@ async def entrypoint(ctx: JobContext):
                 t = text.lower()
                 return float(sum(t.count(tok) for tok in q if tok))
 
-            def retrieve(self, query: str) -> List[NodeWithScore]:
+            def _retrieve(self, query: str) -> List[NodeWithScore]:
                 scored = [
                     NodeWithScore(node=n, score=self._score(n.text or "", query))
                     for n in self.nodes
                 ]
                 scored.sort(key=lambda x: x.score, reverse=True)
                 return scored[: self.k]
-
-            async def aretrieve(self, query: str) -> List[NodeWithScore]:
-                return self.retrieve(query)
 
         nodes = [TextNode(text=d.text) for d in documents]
         retriever = KeywordCountRetriever(nodes, top_k)
