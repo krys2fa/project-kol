@@ -117,14 +117,28 @@ async def entrypoint(ctx: JobContext):
                 self.nodes = nodes
                 self.k = k
 
-            def _score(self, text: str, query: str) -> float:
-                q = query.lower().split()
-                t = text.lower()
+            def _score(self, text: str, query_text: str) -> float:
+                if not query_text:
+                    return 0.0
+                q = str(query_text).lower().split()
+                t = (text or "").lower()
                 return float(sum(t.count(tok) for tok in q if tok))
 
-            def _retrieve(self, query: str) -> List[NodeWithScore]:
+            def _retrieve(self, query_bundle) -> List[NodeWithScore]:
+                # QueryBundle may be an object; extract plain text safely
+                query_text = None
+                try:
+                    # If query_bundle has an attribute 'text' or 'query_str'
+                    query_text = getattr(query_bundle, "text", None) or getattr(query_bundle, "query_str", None)
+                except Exception:
+                    query_text = str(query_bundle)
+
+                if query_text is None:
+                    # Fallback to string conversion
+                    query_text = str(query_bundle)
+
                 scored = [
-                    NodeWithScore(node=n, score=self._score(n.text or "", query))
+                    NodeWithScore(node=n, score=self._score(n.text or "", query_text))
                     for n in self.nodes
                 ]
                 scored.sort(key=lambda x: x.score, reverse=True)
