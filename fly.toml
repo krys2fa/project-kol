@@ -1,0 +1,25 @@
+[app]
+  name = "project-kol-agent"
+
+[build]
+  image = ""
+
+[deploy]
+  release_command = ""
+
+[env]
+  # Example environment variables - set these in Fly dashboard or CLI
+  # GROQ_API_KEY = ""
+  # DEEPGRAM_API_KEY = ""
+
+[experimental]
+  auto_rollback = true
+
+[services]
+  # No http service - this is a background worker. Fly still needs a service
+  [[services]]
+    internal_port = 8080
+    protocol = "tcp"
+    [services.concurrency]
+      hard_limit = 25
+      soft_limit = 20

@@ -1,0 +1,10 @@
+.venv
+__pycache__
+.git
+.github
+.env
+docs/*.pyc
+node_modules
+token-server-vercel
+*.log
+*.sqlite3
